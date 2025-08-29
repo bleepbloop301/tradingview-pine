@@ -1,0 +1,131 @@
+//@version=6 
+indicator("Swing System - PH/PL Highlighting (Unordered)", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// === INPUTS ===
+highSource        = input.source(high, "High Source")
+lowSource         = input.source(low,  "Low Source")
+lineWidth         = input.int(2, "PH/PL Line Width", minval=1)
+pivotDistance     = input.float(1.0, "Pivot-to-Pivot Trigger Distance", minval=0.0)
+priceThreshold    = input.float(1.0, "Price Break Distance (Turn Off)", minval=0.0)
+useRealtimeAlerts = input.bool(true, "Fire inline alert() on state flip (close-only)")
+
+// --- Significant (first-of-zone) line styling ---
+sigLenBars        = input.int(20, "Significant Line Length (bars)", minval=1, maxval=500)
+sigPHColor        = input.color(color.new(color.green, 0), "Significant PH Line Color")
+sigPLColor        = input.color(color.new(color.red,   0), "Significant PL Line Color")
+sigLineWidth      = input.int(2, "Significant Line Width", minval=1, maxval=5)
+
+// === PH/PL Detection ===
+ph = highSource != highSource[1]
+pl = lowSource  != lowSource[1]
+
+// === Memory for PH/PL Levels ===
+var float lastPH    = na
+var float currentPH = na
+var float lastPL    = na
+var float currentPL = na
+
+// === Highlight Switch + State ===
+var bool  highlightSwitch = false
+var float firstPH         = na
+var float firstPL         = na
+
+// Independent readiness flags (unordered)
+var bool phReady = false
+var bool plReady = false
+
+// === PH update ===
+if ph
+    if na(lastPH)
+        lastPH := highSource
+    else if na(currentPH)
+        currentPH := highSource
+    else
+        lastPH := currentPH
+        currentPH := highSource
+
+    phDist = not na(currentPH) and not na(lastPH) ? math.abs(currentPH - lastPH) : na
+    phReady := not na(phDist) and phDist < pivotDistance
+
+    if not highlightSwitch and phReady and plReady
+        highlightSwitch := true
+        firstPH := currentPH
+        firstPL := currentPL
+        phReady := false
+        plReady := false
+        // draw short lines at displaced breakout levels (offset both sides)
+        line.new(bar_index, firstPH + priceThreshold, bar_index + sigLenBars, firstPH + priceThreshold, xloc=xloc.bar_index, extend=extend.none, color=sigPHColor, width=sigLineWidth)
+        line.new(bar_index, firstPL - priceThreshold, bar_index + sigLenBars, firstPL - priceThreshold, xloc=xloc.bar_index, extend=extend.none, color=sigPLColor, width=sigLineWidth)
+
+// === PL update ===
+if pl
+    if na(lastPL)
+        lastPL := lowSource
+    else if na(currentPL)
+        currentPL := lowSource
+    else
+        lastPL := currentPL
+        currentPL := lowSource
+
+    plDist = not na(currentPL) and not na(lastPL) ? math.abs(currentPL - lastPL) : na
+    plReady := not na(plDist) and plDist < pivotDistance
+
+    if not highlightSwitch and phReady and plReady
+        highlightSwitch := true
+        firstPH := currentPH
+        firstPL := currentPL
+        phReady := false
+        plReady := false
+        // draw short lines at displaced breakout levels (offset both sides)
+        line.new(bar_index, firstPH + priceThreshold, bar_index + sigLenBars, firstPH + priceThreshold, xloc=xloc.bar_index, extend=extend.none, color=sigPHColor, width=sigLineWidth)
+        line.new(bar_index, firstPL - priceThreshold, bar_index + sigLenBars, firstPL - priceThreshold, xloc=xloc.bar_index, extend=extend.none, color=sigPLColor, width=sigLineWidth)
+
+// === Turn OFF Logic (based on firstPH/firstPL captured at turn-on)
+if highlightSwitch and not na(firstPH) and not na(firstPL)
+    if close > firstPH + priceThreshold or close < firstPL - priceThreshold
+        highlightSwitch := false
+        // Clear turn-on anchors
+        firstPH := na
+        firstPL := na
+        // Reset PH/PL memories so next sequence starts fresh
+        lastPH := na
+        currentPH := na
+        lastPL := na
+        currentPL := na
+        // Clear readiness flags
+        phReady := false
+        plReady := false
+
+// === Draw PH/PL Lines
+if ph
+    line.new(bar_index, highSource, bar_index + 10, highSource, color=color.green, width=lineWidth)
+if pl
+    line.new(bar_index, lowSource, bar_index + 10, lowSource, color=color.red,   width=lineWidth)
+
+// === Highlight While Active (visual can update intrabar; alerts are close-only)
+bgcolor(highlightSwitch ? color.new(color.orange, 85) : na)
+
+// === CLOSE-ONLY ALERT EDGE DETECTION ===
+var bool prevSwitchClose = false  // prior state captured at bar close only
+
+// Edges true ONLY on a confirmed (closed) bar
+swOnClose  = barstate.isconfirmed and  highlightSwitch and not prevSwitchClose
+swOffClose = barstate.isconfirmed and not highlightSwitch and     prevSwitchClose
+
+// Server-side alert rules (close-only)
+alertcondition(swOnClose,  title="Mean Reversion ON",  message="Mean Reversion Switch TURNED ON")
+alertcondition(swOffClose, title="Mean Reversion OFF", message="Mean Reversion Switch TURNED OFF")
+
+// Optional inline alerts (also close-only)
+if barstate.isconfirmed and useRealtimeAlerts
+    if swOnClose
+        alert("Mean Reversion ON", alert.freq_once_per_bar_close)
+    if swOffClose
+        alert("Mean Reversion OFF", alert.freq_once_per_bar_close)
+
+// Update the stored state AFTER evaluating edges, and ONLY at bar close
+if barstate.isconfirmed
+    prevSwitchClose := highlightSwitch
+
+// === Plot for Highlight State (1 when active, 0 when not)
+plot(highlightSwitch ? 1 : 0, title="Highlight State", color=color.new(color.blue, 0), style=plot.style_line, linewidth=2)
