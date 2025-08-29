@@ -1,0 +1,281 @@
+//@version=6
+indicator("Zone Bounce/Takeout Lifecycle", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+leftLenH   = input.int(10, "Pivot High Left")
+rightLenH  = input.int(10, "Pivot High Right")
+leftLenL   = input.int(10, "Pivot Low Left")
+rightLenL  = input.int(10, "Pivot Low Right")
+zoneRange  = input.float(0.2, "Zone Height", step=0.01)
+colorSteps = input.int(5, "Number of Color Shades (odd)", minval=3, step=2)
+barsToExit = input.int(3, "Bars to Exit Same Side", minval=1)
+maxBarsOutOfZone = input.int(3, "Max Bars Out of Zone", minval=1)
+bounceReward     = input.int(1, "Bounce Score Reward", minval=1)
+takeoutPenalty   = input.int(1, "Takeout Score Penalty", minval=1)
+bounceColor = input.color(color.green, "Bounce Line Color")
+noActionColor = input.color(color.yellow, "No Action Line Color")
+takeoutColor = input.color(color.red, "Takeout Line Color")
+minLineLength = input.float(0.1, "Minimum Line Length (price units)", step=0.01, minval=0.0)
+maxLineLength = input.float(0.5, "Maximum Line Length (price units)", step=0.01, minval=0.0)
+maxAge = input.int(1000, "Max Age for Line Length (bars)", minval=100)
+
+// Generate color arrays (brightest to darkest)
+f_colorArray(_base, _steps) =>
+    var color[] arr = array.new_color()
+    if array.size(arr) == 0
+        for i = 0 to _steps - 1
+            alpha = math.round(90 * i / (_steps - 1))
+            array.push(arr, color.new(_base, alpha))
+    arr
+
+greenArr = f_colorArray(color.green, colorSteps)
+redArr   = f_colorArray(color.red, colorSteps)
+
+// Zone tracking arrays
+var box[]   highBoxes      = array.new_box()
+var float[] highTops       = array.new_float()
+var float[] highBottoms    = array.new_float()
+var int[]   highColorIdx   = array.new_int()
+var int[]   highEntrySide  = array.new_int()   // +1 = from upper side, -1 = from lower side
+var int[]   highEntryBar   = array.new_int()
+var int[]   highEntryActive= array.new_int()
+var int[]   highInZoneBars = array.new_int()   // Tracks bars spent in zone for bounce
+var int[]   highOutZoneBars= array.new_int()   // Tracks bars spent out of zone
+var int[]   highZoneBars   = array.new_int()   // Tracks bar_index of zone creation
+
+var box[]   lowBoxes       = array.new_box()
+var float[] lowTops        = array.new_float()
+var float[] lowBottoms     = array.new_float()
+var int[]   lowColorIdx    = array.new_int()
+var int[]   lowEntrySide   = array.new_int()   // +1 = from upper side, -1 = from lower side
+var int[]   lowEntryBar    = array.new_int()
+var int[]   lowEntryActive = array.new_int()
+var int[]   lowInZoneBars  = array.new_int()   // Tracks bars spent in zone for bounce
+var int[]   lowOutZoneBars = array.new_int()   // Tracks bar_index of zone creation
+var int[]   lowZoneBars    = array.new_int()   // Tracks bar_index of zone creation
+
+// Helper: get middle index
+midIdx = math.floor(colorSteps / 2)
+
+// Calculate line length based on zone age
+f_getLineLength(zoneBar) =>
+    age = bar_index - zoneBar
+    length = maxLineLength - (age / maxAge) * (maxLineLength - minLineLength)
+    math.max(minLineLength, math.min(maxLineLength, length))
+
+// Create high zone on pivot high
+ph = ta.pivothigh(leftLenH, rightLenH)
+if not na(ph)
+    top    = ph + zoneRange / 2
+    bottom = ph - zoneRange / 2
+    b = box.new(bar_index[rightLenH], top, bar_index + 10, bottom,
+         bgcolor=array.get(greenArr, midIdx), border_color=na, extend=extend.right)
+    array.push(highBoxes, b)
+    array.push(highTops, top)
+    array.push(highBottoms, bottom)
+    array.push(highColorIdx, midIdx)
+    array.push(highEntrySide, 0)
+    array.push(highEntryBar, int(na))
+    array.push(highEntryActive, 0)
+    array.push(highInZoneBars, 0)
+    array.push(highOutZoneBars, 0)
+    array.push(highZoneBars, bar_index[rightLenH])
+
+// Create low zone on pivot low
+pl = ta.pivotlow(leftLenL, rightLenL)
+if not na(pl)
+    top    = pl + zoneRange / 2
+    bottom = pl - zoneRange / 2
+    b = box.new(bar_index[rightLenL], top, bar_index + 10, bottom,
+         bgcolor=array.get(redArr, midIdx), border_color=na, extend=extend.right)
+    array.push(lowBoxes, b)
+    array.push(lowTops, top)
+    array.push(lowBottoms, bottom)
+    array.push(lowColorIdx, midIdx)
+    array.push(lowEntrySide, 0)
+    array.push(lowEntryBar, int(na))
+    array.push(lowEntryActive, 0)
+    array.push(lowInZoneBars, 0)
+    array.push(lowOutZoneBars, 0)
+    array.push(lowZoneBars, bar_index[rightLenL])
+
+// === HIGH ZONE LOGIC ===
+// Valid for bounce tracking ONLY when entered from LOWER side (safe zone)
+if array.size(highBoxes) > 0
+    for i = array.size(highBoxes) - 1 to 0
+        hi          = array.get(highTops, i)
+        lo          = array.get(highBottoms, i)
+        colorIdx    = array.get(highColorIdx, i)
+        entrySide   = array.get(highEntrySide, i)
+        entryBar    = array.get(highEntryBar, i)
+        entryActive = array.get(highEntryActive, i)
+        inZoneBars  = array.get(highInZoneBars, i)
+        outZoneBars = array.get(highOutZoneBars, i)
+        zoneBar     = array.get(highZoneBars, i)
+        inZone      = high >= lo and low <= hi
+        outZone     = close > hi
+        safeZone    = close < lo
+        lineLength  = f_getLineLength(zoneBar)
+        y1          = close - lineLength / 2
+        y2          = close + lineLength / 2
+
+        // ENTRY: from safe zone (below bottom) to in zone
+        if entrySide == 0 and inZone and close[1] < lo
+            array.set(highEntrySide, i, -1)             // from lower side
+            array.set(highEntryBar, i, bar_index)
+            array.set(highEntryActive, i, 1)
+            array.set(highInZoneBars, i, 1)
+            array.set(highOutZoneBars, i, 0)
+
+        // TRACKING: evaluate bounce, takeout, or no action
+        // Always check for out of zone, even if not tracking bounce
+        if outZone
+            array.set(highOutZoneBars, i, outZoneBars + 1)
+            if entryActive == 1
+                array.set(highInZoneBars, i, inZoneBars)  // Pause in-zone counter
+        else if inZone and entryActive == 1
+            array.set(highInZoneBars, i, inZoneBars + 1)
+            array.set(highOutZoneBars, i, 0)  // Reset out-of-zone counter
+        else if safeZone and entryActive == 1
+            array.set(highInZoneBars, i, inZoneBars)  // Pause in-zone counter
+            array.set(highOutZoneBars, i, 0)  // Reset out-of-zone counter
+        else
+            array.set(highOutZoneBars, i, 0)  // Reset out-of-zone counter if not out of zone
+
+        // Check for takeout (out of zone for maxBarsOutOfZone)
+        if outZoneBars > maxBarsOutOfZone
+            // Takeout: darken or remove zone
+            if colorIdx == colorSteps - 1
+                box.delete(array.get(highBoxes, i))
+                array.remove(highBoxes, i)
+                array.remove(highTops, i)
+                array.remove(highBottoms, i)
+                array.remove(highColorIdx, i)
+                array.remove(highEntrySide, i)
+                array.remove(highEntryBar, i)
+                array.remove(highEntryActive, i)
+                array.remove(highInZoneBars, i)
+                array.remove(highOutZoneBars, i)
+                array.remove(highZoneBars, i)
+            else
+                newIdx = math.min(colorSteps - 1, colorIdx + 1)
+                array.set(highColorIdx, i, newIdx)
+                box.set_bgcolor(array.get(highBoxes, i), array.get(greenArr, newIdx))
+                line.new(bar_index, y1, bar_index, y2, color=takeoutColor)
+                array.set(highEntrySide, i, 0)
+                array.set(highEntryBar, i, int(na))
+                array.set(highEntryActive, i, 0)
+                array.set(highInZoneBars, i, 0)
+                array.set(highOutZoneBars, i, 0)
+
+        // Check for bounce or no action (only if tracking bounce)
+        else if entryActive == 1
+            if safeZone and inZoneBars <= barsToExit
+                // Bounce: lighten color
+                newIdx = math.max(0, colorIdx - bounceReward)
+                array.set(highColorIdx, i, newIdx)
+                box.set_bgcolor(array.get(highBoxes, i), array.get(greenArr, newIdx))
+                line.new(bar_index, y1, bar_index, y2, color=bounceColor)
+                array.set(highEntrySide, i, 0)
+                array.set(highEntryBar, i, int(na))
+                array.set(highEntryActive, i, 0)
+                array.set(highInZoneBars, i, 0)
+                array.set(highOutZoneBars, i, 0)
+            else if inZoneBars > barsToExit and inZone
+                // No action: draw vertical line and reset tracking
+                line.new(bar_index, y1, bar_index, y2, color=noActionColor)
+                array.set(highEntrySide, i, 0)
+                array.set(highEntryBar, i, int(na))
+                array.set(highEntryActive, i, 0)
+                array.set(highInZoneBars, i, 0)
+                array.set(highOutZoneBars, i, 0)
+
+// === LOW ZONE LOGIC ===
+// Valid for bounce tracking ONLY when entered from UPPER side (safe zone)
+if array.size(lowBoxes) > 0
+    for i = array.size(lowBoxes) - 1 to 0
+        hi          = array.get(lowTops, i)
+        lo          = array.get(lowBottoms, i)
+        colorIdx    = array.get(lowColorIdx, i)
+        entrySide   = array.get(lowEntrySide, i)
+        entryBar    = array.get(lowEntryBar, i)
+        entryActive = array.get(lowEntryActive, i)
+        inZoneBars  = array.get(lowInZoneBars, i)
+        outZoneBars = array.get(lowOutZoneBars, i)
+        zoneBar     = array.get(lowZoneBars, i)
+        inZone      = high >= lo and low <= hi
+        outZone     = close < lo
+        safeZone    = close > hi
+        lineLength  = f_getLineLength(zoneBar)
+        y1          = close - lineLength / 2
+        y2          = close + lineLength / 2
+
+        // ENTRY: from safe zone (above top) to in zone
+        if entrySide == 0 and inZone and close[1] > hi
+            array.set(lowEntrySide, i, +1)              // from upper side
+            array.set(lowEntryBar, i, bar_index)
+            array.set(lowEntryActive, i, 1)
+            array.set(lowInZoneBars, i, 1)
+            array.set(lowOutZoneBars, i, 0)
+
+        // TRACKING: evaluate bounce, takeout, or no action
+        // Always check for out of zone, even if not tracking bounce
+        if outZone
+            array.set(lowOutZoneBars, i, outZoneBars + 1)
+            if entryActive == 1
+                array.set(lowInZoneBars, i, inZoneBars)  // Pause in-zone counter
+        else if inZone and entryActive == 1
+            array.set(lowInZoneBars, i, inZoneBars + 1)
+            array.set(lowOutZoneBars, i, 0)  // Reset out-of-zone counter
+        else if safeZone and entryActive == 1
+            array.set(lowInZoneBars, i, inZoneBars)  // Pause in-zone counter
+            array.set(lowOutZoneBars, i, 0)  // Reset out-of-zone counter
+        else
+            array.set(lowOutZoneBars, i, 0)  // Reset out-of-zone counter if not out of zone
+
+        // Check for takeout (out of zone for maxBarsOutOfZone)
+        if outZoneBars > maxBarsOutOfZone
+            // Takeout: darken or remove zone
+            if colorIdx == colorSteps - 1
+                box.delete(array.get(lowBoxes, i))
+                array.remove(lowBoxes, i)
+                array.remove(lowTops, i)
+                array.remove(lowBottoms, i)
+                array.remove(lowColorIdx, i)
+                array.remove(lowEntrySide, i)
+                array.remove(lowEntryBar, i)
+                array.remove(lowEntryActive, i)
+                array.remove(lowInZoneBars, i)
+                array.remove(lowOutZoneBars, i)
+                array.remove(lowZoneBars, i)
+            else
+                newIdx = math.min(colorSteps - 1, colorIdx + takeoutPenalty)
+                array.set(lowColorIdx, i, newIdx)
+                box.set_bgcolor(array.get(lowBoxes, i), array.get(redArr, newIdx))
+                line.new(bar_index, y1, bar_index, y2, color=takeoutColor)
+                array.set(lowEntrySide, i, 0)
+                array.set(lowEntryBar, i, int(na))
+                array.set(lowEntryActive, i, 0)
+                array.set(lowInZoneBars, i, 0)
+                array.set(lowOutZoneBars, i, 0)
+
+        // Check for bounce or no action (only if tracking bounce)
+        else if entryActive == 1
+            if safeZone and inZoneBars <= barsToExit
+                // Bounce: lighten color
+                newIdx = math.max(0, colorIdx - 1)
+                array.set(lowColorIdx, i, newIdx)
+                box.set_bgcolor(array.get(lowBoxes, i), array.get(redArr, newIdx))
+                line.new(bar_index, y1, bar_index, y2, color=bounceColor)
+                array.set(lowEntrySide, i, 0)
+                array.set(lowEntryBar, i, int(na))
+                array.set(lowEntryActive, i, 0)
+                array.set(lowInZoneBars, i, 0)
+                array.set(lowOutZoneBars, i, 0)
+            else if inZoneBars > barsToExit and inZone
+                // No action: draw vertical line and reset tracking
+                line.new(bar_index, y1, bar_index, y2, color=noActionColor)
+                array.set(lowEntrySide, i, 0)
+                array.set(lowEntryBar, i, int(na))
+                array.set(lowEntryActive, i, 0)
+                array.set(lowInZoneBars, i, 0)
+                array.set(lowOutZoneBars, i, 0)
