@@ -1,0 +1,347 @@
+//@version=6
+indicator("Pivot Points with Gap and Inverse Highlights", "Pivots", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// Input settings
+pivotTypeInput           = input.string(title="Type", defval="Traditional", options=["Traditional", "Fibonacci", "Woodie", "Classic", "DM", "Camarilla"])
+pivotAnchorInput         = input.string(title="Pivots Timeframe", defval="Auto", options=["Auto", "Daily", "Weekly", "Monthly", "Quarterly", "Yearly", "Biyearly", "Triyearly", "Quinquennially", "Decennially"])
+maxHistoricalPivotsInput = input.int(title="Number of Pivots Back", defval=15, minval=1, maxval=200, display=display.data_window)
+gateInput                = input.float(title="Gap Size Gate (%)", defval=5.0, minval=0.0, maxval=100.0, step=0.1, display=display.data_window, tooltip="Minimum gap size as a percentage of the total price range to highlight with a box.")
+shrinkPercentInput       = input.float(title="Current Gap Shrink (%)", defval=10.0, minval=0.0, maxval=50.0, step=0.1, display=display.data_window, tooltip="Percentage to shrink current gap boxes from both ends.")
+isDailyBasedInput        = input.bool(title="Use Daily-based Values", defval=false, display=display.data_window, tooltip="When unchecked, uses intraday data for BTC's 24/7 market.")
+showLabelsInput          = input.bool(title="Show Pivot Labels", defval=true, group="labels", display=display.data_window)
+showPricesInput          = input.bool(title="Show Prices", defval=true, group="labels", display=display.data_window)
+positionLabelsInput      = input.string("Left", "Pivot Labels Position", options=["Left", "Right"], group="labels", display=display.data_window, active=showLabelsInput or showPricesInput)
+linewidthInput           = input.int(title="Line Width", defval=1, minval=1, maxval=100, group="levels", display=display.data_window)
+currentBoxColorInput     = input.color(color.new(color.yellow, 80), title="Current Gap Box Color", group="levels", display=display.data_window)
+pastBoxColorInput        = input.color(color.new(color.blue, 80), title="Past Gap Box Color", group="levels", display=display.data_window)
+inverseBoxColorInput     = input.color(color.new(color.green, 80), title="Inverse Box Color", group="levels", display=display.data_window, tooltip="Color for areas with pivot levels (between shrunk gaps).")
+activeInverseBoxColorInput = input.color(color.new(color.purple, 60), title="Active Inverse Box Color", group="levels", display=display.data_window)
+
+
+DEFAULT_COLOR = #FB8C00
+
+showLevel2and3 = pivotTypeInput != "DM"
+showLevel4 = pivotTypeInput != "DM" and pivotTypeInput != "Fibonacci"
+showLevel5 = pivotTypeInput == "Traditional" or pivotTypeInput == "Camarilla"
+
+pColorInput = input.color(DEFAULT_COLOR, "P", inline="P", group="levels", display=display.data_window)
+pShowInput = input.bool(true, "", inline="P", group="levels", display=display.data_window)
+s1ColorInput = input.color(DEFAULT_COLOR, "S1", inline="S1/R1", group="levels", display=display.data_window)
+s1ShowInput = input.bool(true, "", inline="S1/R1", group="levels", display=display.data_window)
+r1ColorInput = input.color(DEFAULT_COLOR, "R1", inline="S1/R1", group="levels", display=display.data_window)
+r1ShowInput = input.bool(true, "", inline="S1/R1", group="levels", display=display.data_window)
+s2ColorInput = input.color(DEFAULT_COLOR, "S2", inline="S2/R2", group="levels", display=display.data_window, active=showLevel2and3)
+s2ShowInput = input.bool(true, "", inline="S2/R2", group="levels", display=display.data_window, active=showLevel2and3)
+r2ColorInput = input.color(DEFAULT_COLOR, "R2", inline="S2/R2", group="levels", display=display.data_window, active=showLevel2and3)
+r2ShowInput = input.bool(true, "", inline="S2/R2", group="levels", display=display.data_window, active=showLevel2and3)
+s3ColorInput = input.color(DEFAULT_COLOR, "S3", inline="S3/R3", group="levels", display=display.data_window, active=showLevel2and3)
+s3ShowInput = input.bool(true, "", inline="S3/R3", group="levels", display=display.data_window, active=showLevel2and3)
+r3ColorInput = input.color(DEFAULT_COLOR, "R3", inline="S3/R3", group="levels", display=display.data_window, active=showLevel2and3)
+r3ShowInput = input.bool(true, "", inline="S3/R3", group="levels", display=display.data_window, active=showLevel2and3)
+s4ColorInput = input.color(DEFAULT_COLOR, "S4", inline="S4/R4", group="levels", display=display.data_window, active=showLevel4)
+s4ShowInput = input.bool(true, "", inline="S4/R4", group="levels", display=display.data_window, active=showLevel4)
+r4ColorInput = input.color(DEFAULT_COLOR, "R4", inline="S4/R4", group="levels", display=display.data_window, active=showLevel4)
+r4ShowInput = input.bool(true, "", inline="S4/R4", group="levels", display=display.data_window, active=showLevel4)
+s5ColorInput = input.color(DEFAULT_COLOR, "S5", inline="S5/R5", group="levels", display=display.data_window, active=showLevel5)
+s5ShowInput = input.bool(true, "", inline="S5/R5", group="levels", display=display.data_window, active=showLevel5)
+r5ColorInput = input.color(DEFAULT_COLOR, "R5", inline="S5/R5", group="levels", display=display.data_window, active=showLevel5)
+r5ShowInput = input.bool(true, "", inline="S5/R5", group="levels", display=display.data_window, active=showLevel5)
+
+type graphicSettings
+    string levelName
+    color levelColor
+    bool showLevel
+
+type pivotGraphic
+    line pivotLine
+    label pivotLabel
+    float levelPrice
+    string levelName
+    int creationTime
+
+type gapBox
+    box boxObject
+    float top
+    float bottom
+    float originalTop
+    float originalBottom
+    int startTime
+    int endTime
+    bool isCurrent
+
+type inverseBox
+    box boxObject
+    float top
+    float bottom
+    int startTime
+    int endTime
+
+method delete(pivotGraphic graphic) =>
+    graphic.pivotLine.delete()
+    graphic.pivotLabel.delete()
+
+var graphicSettingsArray = array.from(
+      graphicSettings.new(" P", pColorInput, pShowInput),
+      graphicSettings.new("R1", r1ColorInput, r1ShowInput), graphicSettings.new("S1", s1ColorInput, s1ShowInput),
+      graphicSettings.new("R2", r2ColorInput, r2ShowInput), graphicSettings.new("S2", s2ColorInput, s2ShowInput),
+      graphicSettings.new("R3", r3ColorInput, r3ShowInput), graphicSettings.new("S3", s3ColorInput, s3ShowInput),
+      graphicSettings.new("R4", r4ColorInput, r4ShowInput), graphicSettings.new("S4", s4ColorInput, s4ShowInput),
+      graphicSettings.new("R5", r5ColorInput, r5ShowInput), graphicSettings.new("S5", s5ColorInput, s5ShowInput))
+
+var drawnGraphics = matrix.new<pivotGraphic>()
+var boxArray = array.new<gapBox>()
+var inverseBoxArray = array.new<inverseBox>()
+
+// Calculate timeframe duration in milliseconds
+getTimeframeDuration() =>
+    switch pivotAnchorInput
+        "Daily" => 1 * 24 * 60 * 60 * 1000
+        "Weekly" => 7 * 24 * 60 * 60 * 1000
+        "Monthly" => 30 * 24 * 60 * 60 * 1000
+        "Quarterly" => 90 * 24 * 60 * 60 * 1000
+        "Yearly" => 365 * 24 * 60 * 60 * 1000
+        "Biyearly" => 2 * 365 * 24 * 60 * 60 * 1000
+        "Triyearly" => 3 * 365 * 24 * 60 * 60 * 1000
+        "Quinquennially" => 5 * 365 * 24 * 60 * 60 * 1000
+        "Decennially" => 10 * 365 * 24 * 60 * 60 * 1000
+        => 7 * 24 * 60 * 60 * 1000 // Default to Weekly for Auto
+
+autoAnchor = switch
+    timeframe.isintraday => timeframe.multiplier <= 15 ? "1D" : "1W"
+    timeframe.isdaily => "1M"
+    => "12M"
+
+pivotTimeframe = switch pivotAnchorInput
+    "Auto" => autoAnchor
+    "Daily" => "1D"
+    "Weekly" => "1W"
+    "Monthly" => "1M"
+    "Quarterly" => "3M"
+    => "12M"
+
+pivotYearMultiplier = switch pivotAnchorInput
+    "Biyearly" => 2
+    "Triyearly" => 3
+    "Quinquennially" => 5
+    "Decennially" => 10
+    => 1
+
+numOfPivotLevels = switch pivotTypeInput
+    "Traditional" => 11
+    "Camarilla" => 11
+    "Woodie" => 9
+    "Classic" => 9
+    "Fibonacci" => 7
+    "DM" => 3
+
+localPivotTimeframeChange = timeframe.change(pivotTimeframe) and year % pivotYearMultiplier == 0
+securityPivotTimeframeChange = timeframe.change(pivotTimeframe) and year % pivotYearMultiplier == 0
+
+pivotTimeframeChangeCounter(condition) =>
+    var count = 0
+    if condition and bar_index > 0
+        count += 1
+    count
+
+localPivots = ta.pivot_point_levels(pivotTypeInput, localPivotTimeframeChange)
+securityPivotPointsArray = ta.pivot_point_levels(pivotTypeInput, securityPivotTimeframeChange)
+
+securityTimeframe = timeframe.isintraday ? "1D" : timeframe.period
+[securityPivots, securityPivotCounter] = request.security(syminfo.tickerid, pivotTimeframe, [securityPivotPointsArray, pivotTimeframeChangeCounter(securityPivotTimeframeChange)], lookahead=barmerge.lookahead_on)
+pivotPointsArray = isDailyBasedInput ? securityPivots : localPivots
+
+securityPivotDrawConditionStatic = isDailyBasedInput and securityPivotCounter != securityPivotCounter[1]
+localPivotDrawConditionStatic = not isDailyBasedInput and localPivotTimeframeChange
+
+// Function to update existing boxes' end times and colors
+updateBoxEndTimes(endTime) =>
+    if boxArray.size() > 0
+        for b in boxArray
+            if b.endTime > endTime
+                box.set_right(b.boxObject, endTime)
+                b.endTime := endTime
+                if b.isCurrent
+                    box.set_border_color(b.boxObject, pastBoxColorInput)
+                    box.set_bgcolor(b.boxObject, pastBoxColorInput)
+                    b.isCurrent := false
+                    // runtime.log("Updated gap box to past: Top=" + str.tostring(b.originalTop) + ", Bottom=" + str.tostring(b.originalBottom) + ", New End=" + str.tostring(endTime))
+    if inverseBoxArray.size() > 0
+        for b in inverseBoxArray
+            if b.endTime > endTime
+                box.set_right(b.boxObject, endTime)
+                b.endTime := endTime
+                // runtime.log("Updated inverse box: Top=" + str.tostring(b.top) + ", Bottom=" + str.tostring(b.bottom) + ", New End=" + str.tostring(endTime))
+
+// Function to draw highlight boxes for gaps (no pivot levels) and inverse areas (with pivot levels)
+drawGapBoxes(startTime) =>
+    if drawnGraphics.rows() > 0
+        // Collect all pivot levels
+        allLevels = array.new_float(0)
+        for i = 0 to drawnGraphics.rows() - 1
+            levels = drawnGraphics.row(i)
+            for graphic in levels
+                if not na(graphic.levelPrice)
+                    array.push(allLevels, graphic.levelPrice)
+        if allLevels.size() > 1  // Need at least 2 levels to have a gap
+            // Sort levels to find gaps
+            array.sort(allLevels)
+            minPrice = array.min(allLevels)
+            maxPrice = array.max(allLevels)
+            totalRange = maxPrice - minPrice
+            minGapSize = math.max(totalRange * gateInput / 100.0, syminfo.mintick)  // Ensure gap is at least 1 tick
+            // Find gaps and their shrunk boundaries
+            gapsBottom = array.new_float(0)
+            gapsTop = array.new_float(0)
+            shrunkGapsBottom = array.new_float(0)
+            shrunkGapsTop = array.new_float(0)
+            // Check gaps between levels
+            for i = 0 to allLevels.size() - 2
+                bottom = allLevels.get(i)
+                top = allLevels.get(i + 1)
+                gapSize = top - bottom
+                if gapSize >= minGapSize
+                    array.push(gapsBottom, bottom)
+                    array.push(gapsTop, top)
+                    shrinkAmount = gapSize * shrinkPercentInput / 100.0
+                    shrunkBottom = bottom + shrinkAmount / 2
+                    shrunkTop = top - shrinkAmount / 2
+                    array.push(shrunkGapsBottom, shrunkBottom)
+                    array.push(shrunkGapsTop, shrunkTop)
+                    // runtime.log("Gap found: Original Bottom=" + str.tostring(bottom) + ", Original Top=" + str.tostring(top) + ", Size=" + str.tostring(gapSize) + ", MinGapSize=" + str.tostring(minGapSize) + ", Shrunk Bottom=" + str.tostring(shrunkBottom) + ", Shrunk Top=" + str.tostring(shrunkTop))
+            // Find inverse areas using shrunk gap boundaries
+            inverseBottom = array.new_float(0)
+            inverseTop = array.new_float(0)
+            // Inverse area below first gap or from minPrice
+            if shrunkGapsBottom.size() > 0
+                if shrunkGapsBottom.get(0) > minPrice
+                    array.push(inverseBottom, minPrice)
+                    array.push(inverseTop, shrunkGapsBottom.get(0))
+                    // runtime.log("Inverse area: Bottom=" + str.tostring(minPrice) + ", Top=" + str.tostring(shrunkGapsBottom.get(0)))
+            else
+                // No gaps, entire range is inverse
+                array.push(inverseBottom, minPrice)
+                array.push(inverseTop, maxPrice)
+                // runtime.log("Inverse area (no gaps): Bottom=" + str.tostring(minPrice) + ", Top=" + str.tostring(maxPrice))
+            // Inverse areas between gaps
+            if shrunkGapsBottom.size() > 1
+                for i = 0 to shrunkGapsBottom.size() - 2
+                    array.push(inverseBottom, shrunkGapsTop.get(i))
+                    array.push(inverseTop, shrunkGapsBottom.get(i + 1))
+                    // runtime.log("Inverse area: Bottom=" + str.tostring(shrunkGapsTop.get(i)) + ", Top=" + str.tostring(shrunkGapsBottom.get(i + 1)))
+            // Inverse area above last gap
+            if shrunkGapsBottom.size() > 0
+                lastGapTop = shrunkGapsTop.get(shrunkGapsBottom.size() - 1)
+                if lastGapTop < maxPrice
+                    array.push(inverseBottom, lastGapTop)
+                    array.push(inverseTop, maxPrice)
+                    // runtime.log("Inverse area: Bottom=" + str.tostring(lastGapTop) + ", Top=" + str.tostring(maxPrice))
+            // Draw gap boxes
+            timeframeDuration = getTimeframeDuration()
+            endTime = startTime + timeframeDuration
+            if gapsBottom.size() > 0
+                for i = 0 to gapsBottom.size() - 1
+                    bottom = gapsBottom.get(i)
+                    top = gapsTop.get(i)
+                    shrunkBottom = shrunkGapsBottom.get(i)
+                    shrunkTop = shrunkGapsTop.get(i)
+                    if shrunkTop - shrunkBottom >= syminfo.mintick  // Ensure valid box size
+                        newBox = box.new(left=startTime, top=shrunkTop, bottom=shrunkBottom, right=endTime, border_color=currentBoxColorInput, bgcolor=currentBoxColorInput, xloc=xloc.bar_time)
+                        array.push(boxArray, gapBox.new(newBox, shrunkTop, shrunkBottom, top, bottom, startTime, endTime, true))
+                        // runtime.log("New current gap box: Shrunk Top=" + str.tostring(shrunkTop) + ", Shrunk Bottom=" + str.tostring(shrunkBottom) + ", Original Top=" + str.tostring(top) + ", Original Bottom=" + str.tostring(bottom) + ", Start=" + str.tostring(startTime) + ", End=" + str.tostring(endTime))
+            // else
+                // runtime.log("No qualifying gaps found: No gap boxes drawn")
+            // Draw inverse boxes
+            if inverseBottom.size() > 0
+                for i = 0 to inverseBottom.size() - 1
+                    bottom = inverseBottom.get(i)
+                    top = inverseTop.get(i)
+                    if top - bottom >= syminfo.mintick  // Ensure valid box size
+                        newBox = box.new(left=startTime, top=top, right=endTime, bottom=bottom, border_color=inverseBoxColorInput, bgcolor=inverseBoxColorInput, xloc=xloc.bar_time)
+                        array.push(inverseBoxArray, inverseBox.new(newBox, top, bottom, startTime, endTime))
+                        // runtime.log("New inverse box: Top=" + str.tostring(top) + ", Bottom=" + str.tostring(bottom) + ", Start=" + str.tostring(startTime) + ", End=" + str.tostring(endTime))
+            // else
+                // runtime.log("No inverse areas found: No inverse boxes drawn")
+
+affixOldPivots(startTime) =>
+    if drawnGraphics.rows() > 0
+        lastGraphics = drawnGraphics.row(drawnGraphics.rows() - 1)
+        farFutureTime = startTime + 100 * 365 * 24 * 60 * 60 * 1000
+        for graphic in lastGraphics
+            line.set_x2(graphic.pivotLine, farFutureTime)
+            if positionLabelsInput == "Right"
+                label.set_x(graphic.pivotLabel, farFutureTime)
+
+drawNewPivots(startTime) =>
+    newGraphics = array.new<pivotGraphic>()
+    farFutureTime = startTime + 100 * 365 * 24 * 60 * 60 * 1000
+    for [index, coord] in pivotPointsArray
+        levelSettings = graphicSettingsArray.get(index)
+        if not na(coord) and levelSettings.showLevel
+            pivotLine = line.new(startTime, coord, farFutureTime, coord, xloc=xloc.bar_time, color=levelSettings.levelColor, width=linewidthInput)
+            pivotLabel = label.new(x=positionLabelsInput == "Left" ? startTime : farFutureTime,
+                               y=coord,
+                               text=(showLabelsInput ? levelSettings.levelName + " " : "") + (showPricesInput ? "(" + str.tostring(coord, format.mintick) + ")" : ""),
+                               style=positionLabelsInput == "Left" ? label.style_label_right : label.style_label_left,
+                               textcolor=levelSettings.levelColor,
+                               color=#00000000,
+                               xloc=xloc.bar_time)
+            array.push(newGraphics, pivotGraphic.new(pivotLine, pivotLabel, coord, levelSettings.levelName, startTime))
+    if newGraphics.size() > 0
+        drawnGraphics.add_row(array_id=newGraphics)
+        if drawnGraphics.rows() > maxHistoricalPivotsInput
+            oldGraphics = drawnGraphics.remove_row(0)
+            for graphic in oldGraphics
+                graphic.delete()
+
+// Clean up old boxes to prevent exceeding max_boxes_count
+if boxArray.size() > 0
+    i = 0
+    while i < boxArray.size()
+        b = boxArray.get(i)
+        if time > b.endTime + getTimeframeDuration()
+            box.delete(b.boxObject)
+            array.remove(boxArray, i)
+            // runtime.log("Removed old gap box: Top=" + str.tostring(b.originalTop) + ", Bottom=" + str.tostring(b.originalBottom))
+        else
+            i += 1
+if inverseBoxArray.size() > 0
+    i = 0
+    while i < inverseBoxArray.size()
+        b = inverseBoxArray.get(i)
+        if time > b.endTime + getTimeframeDuration()
+            box.delete(b.boxObject)
+            array.remove(inverseBoxArray, i)
+            // runtime.log("Removed old inverse box: Top=" + str.tostring(b.top) + ", Bottom=" + str.tostring(b.bottom))
+        else
+            i += 1
+
+if (securityPivotDrawConditionStatic or localPivotDrawConditionStatic)
+    updateBoxEndTimes(time)
+    affixOldPivots(time)
+    drawNewPivots(time)
+    drawGapBoxes(time)
+// Recolor inverse boxes when price is inside them for the current period
+if inverseBoxArray.size() > 0
+    for b in inverseBoxArray
+        // Only consider the currently relevant time window
+        timeInWindow = time >= b.startTime and time <= b.endTime
+        inZone = close >= b.bottom and close <= b.top
+        if timeInWindow and inZone
+            box.set_bgcolor(b.boxObject, activeInverseBoxColorInput)
+            box.set_border_color(b.boxObject, activeInverseBoxColorInput)
+        else
+            // revert to default inverse coloring when not active
+            box.set_bgcolor(b.boxObject, inverseBoxColorInput)
+            box.set_border_color(b.boxObject, inverseBoxColorInput)
+
+// Error handling
+var FIRST_BAR_TIME = time
+if (barstate.islastconfirmedhistory and drawnGraphics.rows() == 0)
+    if not na(securityPivots[0]) and securityPivotCounter > 0
+        if isDailyBasedInput
+            drawNewPivots(FIRST_BAR_TIME)
+            drawGapBoxes(FIRST_BAR_TIME)
+        else
+            runtime.error("Not enough intraday data to calculate Pivot Points. Lower the Pivots Timeframe or turn on the 'Use Daily-based Values' option in the indicator settings.")
+    else
+        runtime.error("Not enough data to calculate Pivot Points. Lower the Pivots Timeframe in the indicator settings.")
