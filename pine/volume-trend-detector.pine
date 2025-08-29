@@ -1,0 +1,78 @@
+//@version=6
+indicator("High Turning Points (Gated) + 3-High Coloring", overlay=false, precision=4)
+
+// ——— Inputs ———
+src        = input.source(close, "Source")
+strictTurn = input.bool(false, "Strict turn (> then <). If off, flats allowed (>= then <=).")
+
+// Gate in *thousands* (e.g., 5 = 5000 units)
+highGateK  = input.float(5.0, "High Gate (thousands)", minval=0.0, step=0.1)
+gate       = highGateK * 1000.0
+
+// Triangle styling
+sizeOpt    = input.string("Small", "Triangle size", options=["Tiny","Small","Normal","Large","Huge"])
+baseColorI = input.color(color.new(color.gray, 60), "Base Triangle Color")
+upColorI   = input.color(color.new(color.green, 0), "3 Higher Highs Color")
+dnColorI   = input.color(color.new(color.red,   0), "3 Lower Highs Color")
+
+// 3-high sequence spacing (adjacent highs must be within this many bars)
+maxGapBars = input.int(20, "Max Bars Between Consecutive Highs", minval=1)
+
+// ——— Turning-high detection at bar[1] (non-repainting) ———
+float s0 = src          // current
+float s1 = src[1]       // candidate peak (prior bar)
+float s2 = src[2]       // two bars ago
+
+bool incBefore = strictTurn ? (s1 >  s2) : (s1 >= s2)
+bool decAfter  = strictTurn ? (s0 <  s1) : (s0 <= s1)
+
+float riseIntoPeak = s1 - s2
+float fallFromPeak = s1 - s0
+
+// Peak condition: turn + both sides exceed the gate
+bool turnHighAtBar1 = incBefore and decAfter and (riseIntoPeak >= gate) and (fallFromPeak >= gate)
+
+// ——— Plot source for context ———
+plot(src, color=color.new(color.gray, 30), title="Source")
+
+// ——— Keep last 3 confirmed (gated) peaks (value + bar index) ———
+var float p1 = na
+var float p2 = na
+var float p3 = na
+var int   b1 = na
+var int   b2 = na
+var int   b3 = na
+
+if turnHighAtBar1
+    // new confirmed peak is on bar_index - 1
+    p1 := p2
+    b1 := b2
+    p2 := p3
+    b2 := b3
+    p3 := s1
+    b3 := bar_index - 1
+
+// Check sequence status on this bar (after update above)
+bool have3   = (not na(p1)) and (not na(p2)) and (not na(p3)) and (not na(b1)) and (not na(b2)) and (not na(b3))
+bool gapsOK  = have3 and (b2 - b1 <= maxGapBars) and (b3 - b2 <= maxGapBars)
+bool seqUp   = gapsOK and (p1 < p2) and (p2 < p3)   // three consecutive higher highs
+bool seqDown = gapsOK and (p1 > p2) and (p2 > p3)   // three consecutive lower highs
+
+// Decide color for the triangle printed this bar (if any peak confirmed this bar)
+color triColorNow = baseColorI
+if seqUp
+    triColorNow := upColorI
+else if seqDown
+    triColorNow := dnColorI
+
+// ——— Plot triangles (const-size workaround via gated calls) ———
+plotshape(turnHighAtBar1 and sizeOpt == "Tiny"   ? s1 : na, title="High Tiny",   style=shape.triangleup, location=location.absolute, color=triColorNow, size=size.tiny,   offset=-1)
+plotshape(turnHighAtBar1 and sizeOpt == "Small"  ? s1 : na, title="High Small",  style=shape.triangleup, location=location.absolute, color=triColorNow, size=size.small,  offset=-1)
+plotshape(turnHighAtBar1 and sizeOpt == "Normal" ? s1 : na, title="High Normal", style=shape.triangleup, location=location.absolute, color=triColorNow, size=size.normal, offset=-1)
+plotshape(turnHighAtBar1 and sizeOpt == "Large"  ? s1 : na, title="High Large",  style=shape.triangleup, location=location.absolute, color=triColorNow, size=size.large,  offset=-1)
+plotshape(turnHighAtBar1 and sizeOpt == "Huge"   ? s1 : na, title="High Huge",   style=shape.triangleup, location=location.absolute, color=triColorNow, size=size.huge,   offset=-1)
+
+// ——— Alerts ———
+alertcondition(turnHighAtBar1, title="High Turning Point (Gated)", message="High turning point passed gate on source")
+alertcondition(seqUp,         title="3 Higher Highs",              message="Three consecutive HIGHER highs (gated, within max bars)")
+alertcondition(seqDown,       title="3 Lower Highs",               message="Three consecutive LOWER highs (gated, within max bars)")
